@@ -1,0 +1,15 @@
+# Isolated env for LACPo pretrained models (sklearn 0.20 pickle format).
+# Conda-forge no longer ships scikit-learn 0.20.4, so use CPython 3.7 + pip:
+#   .envs/py37/python.exe -m pip install -r requirements-lacpo.txt
+name: lacpo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.7
+  - pip
+  - pip:
+      - scikit-learn==0.20.4
+      - pandas==0.25.3
+      - numpy==1.16.6
+      - scipy==1.2.3
+      - tabulate

@@ -1,0 +1,14 @@
+category,token,iq,fu_code,hw_units,rf_int_rd,rf_int_wr,rf_fp_rd,rf_fp_wr,ex_lat_clks,demand,prior_w_mA,riscv_examples,uopc
+INT_ALU,LOW,INT,FU_ALU,"INT_IQ,ALU,intRF",2,1,0,0,1,short,8,"add,addi,sub,and,or,xor,slt,lui,auipc,sll,srl,sra,+W",uopADD/uopADDI/uopLUI
+INT_BR,LOW,INT,FU_ALU,"INT_IQ,ALU,BRU,BTB/gshare",2,0,0,0,1,short,10,"beq,bne,blt,bge,jal,jalr",uopBEQ/uopJAL
+INT_MUL,HIGH,INT,FU_MUL,"INT_IQ,IMul,intRF",2,1,0,0,3,medium,28,"mul,mulh,mulw",uopMUL
+INT_DIV,HIGH,INT,FU_DIV,"INT_IQ,IDiv,intRF",2,1,0,0,16,long,35,"div,rem,divw",uopDIV
+INT_CSR,MID,INT,FU_CSR,"INT_IQ,CSR pipe",1,1,0,0,1,short,12,"csrrw,csrrs,wfi,eret",uopCSRRW
+MEM_LD,MID,MEM,FU_MEM,"MEM_IQ,AGU,LDQ,D$,MSHR,intRF",1,1,0,0,3,medium,22,"lb,lh,lw,ld,lbu,flw,fld,lr",uopLD
+MEM_ST,MID,MEM,FU_MEM,"MEM_IQ,AGU,STQ,D$,intRF",2,0,0,0,1,medium,18,"sb,sh,sw,sd,fsw,fsd",uopSTA+uopSTD
+MEM_AMO,HIGH,MEM,FU_MEM,"MEM_IQ,AGU,LDQ,STQ,D$,intRF",2,1,0,0,4,long,30,"amoadd,amoswap,sc",uopAMO_AG
+FP_ALU,HIGH,FP,FU_FPU,"FP_IQ,FPU,fpRF",0,0,2,1,4,medium,32,"fadd,fsub,fmul,fsgnj,fmin,fcvt",uopFADD/uopFMUL
+FP_FMA,HIGH,FP,FU_FPU,"FP_IQ,FPU,fpRF (3r/1w)",0,0,3,1,4,medium,40,"fmadd,fmsub,fnmadd",uopFMADD
+FP_DIV,HIGH,FP,FU_FDV,"FP_IQ,FDiv/Sqrt,fpRF",0,0,2,1,16,long,45,"fdiv,fsqrt",uopFDIV/uopFSQRT
+FP_MOV,MID,INT/FP,FU_I2F/FU_F2I,"FP or INT IQ,FPU move,both RFs",1,1,1,1,2,short,16,"fmv.x.d,fmv.d.x",uopFMV
+SYS,LOW,INT,FU_MEM,"fence/sfence serialize",0,0,0,0,1,long,6,"fence,fence.i,sfence",uopFENCE

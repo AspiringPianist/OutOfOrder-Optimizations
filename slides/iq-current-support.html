@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Issue-queue current shaping — support slides</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#000; font: 22px/1.35 "Times New Roman", Times, serif; color:#000; }
+  .deck { height:100%; }
+  .slide {
+    display:none; height:100%; padding:48px 64px;
+    background:#fff; flex-direction:column; justify-content:center;
+    border: 1px solid #000;
+  }
+  .slide.on { display:flex; }
+  h1 { font-size:36px; font-weight:700; margin:0 0 20px; }
+  h2 { font-size:15px; font-weight:700; color:#000; text-transform:uppercase; letter-spacing:.08em; margin:0 0 12px; border-bottom:1px solid #000; padding-bottom:6px; }
+  p, li { margin:0 0 10px; }
+  ul { margin:0; padding-left:1.1em; }
+  .cite { font-size:16px; }
+  table { border-collapse:collapse; width:100%; font-size:18px; }
+  th, td { text-align:left; padding:8px 12px 8px 0; border-bottom:1px solid #000; vertical-align:top; }
+  th { font-weight:700; font-size:14px; text-transform:uppercase; }
+  .row { display:flex; gap:40px; }
+  .row > * { flex:1; }
+  .foot { position:absolute; bottom:24px; left:64px; right:64px; font-size:13px; color:#000; display:flex; justify-content:space-between; border-top:1px solid #000; padding-top:8px; }
+  .slide { position:relative; }
+  code { font-family: Consolas, "Courier New", monospace; font-size:0.9em; }
+  .gap { font-weight:700; }
+  @media print {
+    html, body { background:#fff; height:auto; }
+    .slide { display:flex !important; height:100vh; page-break-after:always; position:relative; }
+    .foot { position:absolute; }
+  }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<section class="slide on">
+  <h2>Support, not a claim of results</h2>
+  <h1>Shape I(t) at the issue queue so less decoupling C is needed</h1>
+  <p>Pack high-current uops, then low-current uops. Control the excitation. Do not lock the story to a buck converter.</p>
+  <p class="cite">Sources: our deck <em>Powering Superscalar Processors</em>; Lin &amp; Chang, EUC 2006 (LinC06.pdf). BOOM fields from Chipyard 1.3 <code>IssueUnitCollapsing</code>.</p>
+  <div class="foot"><span>IQ current shaping</span><span>1 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>Papers already on the table</h2>
+  <table>
+    <tr><th>Paper</th><th>What it actually does</th><th>What it does not</th></tr>
+    <tr>
+      <td>Kumar, Alsalamin, Amrouch, Gerstlauer, <em>IEEE TC</em> 2023 (LACPo)</td>
+      <td>Activity → decision trees → cycle P(t) on BOOM. Oracle for I(t)=P/V.</td>
+      <td>Does not schedule. Does not size decap.</td>
+    </tr>
+    <tr>
+      <td>Meng &amp; Saleh, <em>IEEE JSSC</em> 2009</td>
+      <td>Active decap. Senses V, switches C. 10–20% noise vs passive, 90 nm.</td>
+      <td>Reacts to droop. No instruction stream. No lead time.</td>
+    </tr>
+    <tr>
+      <td>Lin &amp; Chang, EUC 2006 (LinC06)</td>
+      <td>Compiler: merge FU-alike regions, DVS, turn idle ALUs/MULs off. Wattch. ~26% energy, ~12–18% slowdown.</td>
+      <td>Not hardware issue select. Not PDN. Not current class. Not C.</td>
+    </tr>
+    <tr>
+      <td>Pathania, HotSniper (2021) — in our deck</td>
+      <td>Thermal interval sim. Supports “hotspot ≠ whole-core throttle.”</td>
+      <td>Not PDN, not issue queue.</td>
+    </tr>
+  </table>
+  <div class="foot"><span>What prior work covers</span><span>2 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>Honest gap</h2>
+  <div class="row">
+    <div>
+      <p><strong>LinC06</strong> groups work that uses the same FU so that unit can sleep longer. Energy via DVS / FU gating.</p>
+      <p><strong>Meng</strong> dumps charge after V already moved.</p>
+      <p><strong>LACPo</strong> estimates P(t) after the fact.</p>
+    </div>
+    <div>
+      <p class="gap">Nobody in these refs selects ready uops by predicted current, at the IQ grant loop, to cut on-die C.</p>
+      <p>Closest compiler cousin: Rele et al. (cited in LinC06) — idle FU gating on a superscalar. Still not PDN, still not grant.</p>
+    </div>
+  </div>
+  <div class="foot"><span>We are not repeating LinC06</span><span>3 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>Medium BOOM — what actually picks the next uop</h2>
+  <p>Age-ordered collapsing IQ. Oldest = slot 0. No age tag.</p>
+  <table>
+    <tr><th>Wire / field</th><th>Job</th></tr>
+    <tr><td><code>p1 p2 p3 ppred</code></td><td>Operands present → <code>request</code></td></tr>
+    <tr><td><code>fu_code</code> [9:0]</td><td>Port legal: <code>(fu_code &amp; fu_types) ≠ 0</code></td></tr>
+    <tr><td><code>uopc</code> [8:0]</td><td>Opcode class (ALU / mul / FMA / …)</td></tr>
+    <tr><td><code>state</code></td><td>Empty / one uop / split store</td></tr>
+    <tr><td>slot index</td><td>Priority. First request that fits a free port gets <code>grant</code></td></tr>
+    <tr><td><code>is_br / is_jal / is_jalr</code></td><td><code>request_hp</code> only in unordered IQ. Medium BOOM does not use this path.</td></tr>
+  </table>
+  <p class="cite">No current bit exists. LACPo logs <code>state, uopc, fu_code</code> per slot — not <code>request</code> / <code>grant</code> / <code>p*</code>.</p>
+  <div class="foot"><span>issue-slot.scala · issue-unit-age-ordered.scala</span><span>4 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>Proposed change</h2>
+  <p>In the grant loop: ready ∧ FU-legal ∧ <strong>current class</strong>.</p>
+  <ul>
+    <li>Class from <code>uopc</code> / <code>fu_code</code>, or one extra MicroOp bit.</li>
+    <li>High window, then low window. Same ILP budget, different I(t) envelope.</li>
+    <li>Goal: C<sub>needed</sub> ↓ because di/dt is scheduled, not only filtered.</li>
+  </ul>
+  <p class="cite">Active dump / tokens (our existing deck) stay optional for tails. IQ shaping is the new claim.</p>
+  <div class="foot"><span>Where the patent knob sits</span><span>5 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>Question for ma’am</h2>
+  <p>This is instruction-side current shaping. Converter topology is not the claim.</p>
+  <ul>
+    <li>Where does her controller live — board VRM, package, on-die IVR?</li>
+    <li>Is a 2-level current hint from the IQ a useful input to that loop?</li>
+    <li>What latency can that loop actually use? (~30 clk token vs 0–2 clk issue fire)</li>
+  </ul>
+  <div class="foot"><span>Do not say “buck” unless she does</span><span>6 / 7</span></div>
+</section>
+
+<section class="slide">
+  <h2>What is true today</h2>
+  <ul>
+    <li>LACPo path works on dummy VCD. Dummy I(t) is not RTL.</li>
+    <li>Lead-time numbers in our deck are schematic, not a measured VCD study.</li>
+    <li>MediumBoom debug sim is built. <code>load_step</code> smoke is running. Real VCD is next.</li>
+  </ul>
+  <p class="cite">Kumar et al., IEEE TC 2023, doi:10.1109/TC.2022.3185572 · Meng &amp; Saleh, IEEE JSSC 2009, doi:10.1109/JSSC.2008.2010752 · Lin &amp; Chang, EUC 2006, doi:10.1007/11802167_6</p>
+  <div class="foot"><span>← →  · click  · print to PDF</span><span>7 / 7</span></div>
+</section>
+
+</div>
+<script>
+  const s=[...document.querySelectorAll('.slide')];
+  let i=0;
+  function show(n){ i=(n+s.length)%s.length; s.forEach((el,k)=>el.classList.toggle('on',k===i)); }
+  document.addEventListener('keydown', e=>{
+    if(e.key==='ArrowRight'||e.key===' ' ||e.key==='PageDown') { e.preventDefault(); show(i+1); }
+    if(e.key==='ArrowLeft'||e.key==='PageUp') { e.preventDefault(); show(i-1); }
+  });
+  document.addEventListener('click', e=>{ if(e.target.closest('a')) return; show(i+1); });
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+.envs/
+traces/
+__pycache__/
+*.pyc
+.cursor/

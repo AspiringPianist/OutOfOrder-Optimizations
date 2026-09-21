@@ -213,9 +213,7 @@ def calc_mult (statement, opt_timescale=''):
         'ms' : 1e-03,
          's' : 1e-00,
     }
-    mults_keys = mults.keys()
-    mults_keys.sort(key=lambda x : mults[x])
-    usage = '|'.join(mults_keys)
+    usage = '|'.join(sorted(mults.keys(), key=lambda x: mults[x]))
 
     scale = 0
     if units in mults:
