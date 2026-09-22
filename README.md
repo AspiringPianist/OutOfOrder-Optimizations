@@ -23,38 +23,103 @@ LACPo pickles and the built Verilator sim are **Chipyard 1.3.0 `MediumBoomConfig
 
 A 4-wide / ROB-128 / 2-AGU / 512 KiB L2 picture is **MegaBoom-class**. ICPP08 Table 2 is an 8-wide Alpha SMT (ACE tags, not BOOM). Do not retarget Chisel to either until LACPo is retrained.
 
-# Hardware categories → tokens
+# How instructions map onto hardware (and how current is modelled)
 
-Every opcode in BOOM `decode.scala` maps to a class. Classes are the token grain because many uops issue in the same cycle; a per-dynamic-instruction joule is ill-posed.
+Two layers. We have (1) a **static** ISA → unit map from BOOM decode, and (2) **measured** per-block I(t) from LACPo on a real VCD. We do **not** yet have per-cycle occupancy `N_c[n]` (which classes sat in those units on hello). Tokens stay priors until that column exists.
 
-Full opcode map: [`sim/isa_uop_map.csv`](sim/isa_uop_map.csv) (188 ops). Category rollup: [`sim/isa_hw_categories.csv`](sim/isa_hw_categories.csv). Code: [`tools/isa_hw_tokens.py`](tools/isa_hw_tokens.py), [`tools/dump_decode_map.py`](tools/dump_decode_map.py).
+```
+RISC-V opcode  →  BOOM uopc + IQT_* + FU_*     (decode.scala)
+               →  13 hardware classes          (units, ports, RF, latency)
+               →  LOW / MID / HIGH token
+                                          ↘
+VCD activity nets → 20 LACPo DTs → P_u(t) → I_u = P_u / 1.1 V
+                                          → tile I[n] = Σ I_u
+I[n]  ≈  I0 + Σ_c w_c · N_c[n]     ← N_c still to extract from issue/EX
+```
 
-| Class | Token | Units used | Medium ports | Demand |
+A per-dynamic-instruction joule is ill-posed: MediumBoom can issue 2 INT + 1 MEM + 1 FP in the same cycle, and a DIV keeps the FU for many cycles. The token grain is the **class**, and the scheduler spends the **sum** of in-flight classes.
+
+## Static map: every opcode → units it utilizes
+
+`tools/dump_decode_map.py` parses Chipyard 1.3 `decode.scala` (`riscv -> List(..., uop*, IQT_*, FU_*)`). That is BOOM’s own issue routing, not a guess.
+
+| decode field | What it names | Where it goes |
+|---|---|---|
+| `uopc` | micro-op (`uopADD`, `uopLD`, `uopMUL`, …) | class via `SPECIAL_UOP` / `uopc_to_category` |
+| `IQT_*` | which issue queue | INT (102 ops) / MEM (36) / FP (48) / MFP (2) |
+| `FU_*` | which execution unit + port mask | `fu_code & fu_types(port)` at grant |
+
+188 opcodes → 13 classes → 44 LOW / 81 MID / 63 HIGH. Full table: [`sim/isa_uop_map.csv`](sim/isa_uop_map.csv). Rollup (RF ports, EX latency, demand): [`sim/isa_hw_categories.csv`](sim/isa_hw_categories.csv). Code: [`tools/isa_hw_tokens.py`](tools/isa_hw_tokens.py).
+
+`FU_*` → class (overrides for stores / AMO / FMA / branches / fence):
+
+| `FU_*` | Class | Token | Medium ports that can take it | Hardware utilized |
 |---|---|---|---|---|
-| INT_ALU | LOW | ALU + int RF | INT0, INT1 | 1 clk |
-| INT_BR | LOW | ALU/BRU, BTB, gshare, RAS | INT0 (JAL); INT0/1 (BR) | 1 clk |
-| SYS | LOW | fence serialize | — | long |
-| INT_CSR | MID | CSR pipe | INT1 | 1 clk |
-| MEM_LD | MID | AGU, LDQ, D$, MSHR | MEM0 | ~3 clk |
-| MEM_ST | MID | AGU, STQ, D$ | MEM0 | 1 clk issue |
-| FP_MOV | MID | IntToFP / FPToInt | INT0 or FP0 | ~2 clk |
-| INT_MUL | HIGH | IMul | INT0 only | ~3 clk |
-| INT_DIV | HIGH | IDiv | INT1 only | long |
-| MEM_AMO | HIGH | AGU, LDQ, STQ, D$ | MEM0 | long |
-| FP_ALU | HIGH | FPU + fp RF | FP0 | 4 clk |
-| FP_FMA | HIGH | FPU 3R/1W | FP0 | 4 clk |
-| FP_DIV | HIGH | FDiv/Sqrt | FP0 | long |
+| `FU_ALU` | INT_ALU (32) | LOW | INT0, INT1 | INT IQ, ALU, int RF (2R/1W), 1 clk |
+| `FU_JMP` | INT_BR (9) | LOW | INT0 | INT IQ, ALU/BRU, BTB, gshare, RAS |
+| `FU_MUL` | INT_MUL (5) | HIGH | **INT0 only** | INT IQ, IMul, int RF, ~3 clk |
+| `FU_DIV` | INT_DIV (8) | HIGH | **INT1 only** | INT IQ, IDiv, int RF, long |
+| `FU_CSR` | INT_CSR (36) | MID | INT1 | INT IQ, CSR pipe |
+| `FU_MEM` + `uopLD` | MEM_LD (11) | MID | MEM0 | MEM IQ, AGU, LDQ, D$, MSHR, ~3 clk |
+| `FU_MEM` + `uopSTA`/`uopSTD` | MEM_ST (6) | MID | MEM0 | MEM IQ, AGU, STQ, D$ |
+| `FU_MEM` + `uopAMO_AG` | MEM_AMO (20) | HIGH | MEM0 | MEM IQ, AGU, LDQ, STQ, D$, long |
+| `FU_FPU` (add/mul/…) | FP_ALU (18) | HIGH | FP0 | FP IQ, FPU, fp RF (2R/1W), 4 clk |
+| `FU_FPU` + `uopFMADD*` | FP_FMA (8) | HIGH | FP0 | FP IQ, FPU, fp RF (3R/1W), 4 clk |
+| `FU_FDV` | FP_DIV (4) | HIGH | FP0 | FP IQ, FDiv/Sqrt, long |
+| `FU_I2F` / `FU_F2I` | FP_MOV (28) | MID | INT0 or FP0 | IntToFP / FPToInt, both RFs |
+| `FU_X` / fence | SYS (3) | LOW | — | pipeline serialize |
 
-Token composition (concurrent issue is the model, not a bug):
+Examples from the dump (same row format as the CSV):
+
+| RISC-V | `uopc` | IQ | `FU_*` | Class | Units utilized |
+|---|---|---|---|---|---|
+| `ADDI` | `uopADDI` | INT | `FU_ALU` | INT_ALU | INT IQ + ALU + int RF |
+| `BEQ` | `uopBEQ` | INT | `FU_ALU` | INT_BR | INT IQ + ALU/BRU + BTB/gshare |
+| `MUL` | `uopMUL` | INT | `FU_MUL` | INT_MUL | INT IQ + IMul (INT0) + int RF |
+| `DIV` | `uopDIV` | INT | `FU_DIV` | INT_DIV | INT IQ + IDiv (INT1) + int RF |
+| `LD` | `uopLD` | MEM | `FU_MEM` | MEM_LD | MEM IQ + AGU + LDQ + D$ |
+| `SD` | `uopSTA` | MEM | `FU_MEM` | MEM_ST | MEM IQ + AGU + STQ + D$ |
+| `FMADD_D` | `uopFMADD_D` | FP | `FU_FPU` | FP_FMA | FP IQ + FPU (3R/1W) |
+
+That is **utilization intent** — which blocks a uop is *allowed* to occupy. It is not a count of how many were in-flight on hello.
+
+## Measured current: LACPo models the units, not the opcode
+
+LACPo does **not** predict “this `addi` costs X mA.” Each of 20 pretrained DTs (PTPX hierarchical power, sklearn 0.20, depth 10) predicts **one hardware block’s** `P_u` from that block’s VCD activity features. Tile current is the composed sum:
+
+```
+P_tile[n] = Σ_u P_u[n]          (20 trees, including core_glue = parent − Σ children)
+I_u[n]    = P_u[n] / 1.1 V
+I_tile[n] = Σ_u I_u[n]
+```
+
+The instruction map tells us **which classes drive which trees**. Hello I(t) then says how hard those trees actually drew:
+
+| Instruction classes | LACPo blocks they utilize | Hello mean → peak |
+|---|---|---|
+| INT_ALU, INT_BR, INT_MUL | INT IQ; INT0 ALU/JMP/MUL; int RF / RF read | IQ 2.1→14.4 mA; ALU0 4.5→20.2; RF 5.5→**37.2** |
+| INT_CSR, INT_DIV | INT1 ALU/CSR/DIV; CSR file | 0.80→7.4 mA; 0.80→3.0 |
+| MEM_LD, MEM_ST, MEM_AMO | MEM IQ; LSU (AGU/LDQ/STQ/D$) | IQ 2.0→12.5; LSU **flat 4.1** (unmatched nets) |
+| FP_ALU, FP_FMA, FP_DIV, FP_MOV | FP IQ/FPU/FMA/FDiv | 8.1→19.4 (hello has no FP — floor) |
+| INT_BR (+ all fetch) | I$/FTQ; BTB; gshare/BPD | fetch 4.8→9.4; BTB/BPD **flat** (unmatched) |
+| every uop | decode0/1; maptables; freelists; ROB | decode 0.3 mA; ROB 2.5→8.0; rename peaks with INT EX |
+| — | tile glue | 9.9→18.8 mA |
+
+Frontend / decode / ROB / glue run for the pipeline, not for one opcode. The **issue-time packing knob** is the INT/MEM/FP IQ + EX + RF rows.
+
+## Linear mix (how a token is supposed to be used)
 
 ```
 I[n]  ≈  I0 + Σ_c  w_c · N_c[n]
 E[n]  =  I[n] · 1.1 V · 3 ns
 ```
 
-`N_c[n]` is how many class-`c` uops are issued or still in EX this cycle. `w_c` is the per-class **power token** (mA of extra tile current). The scheduler spends the **sum**. `E[n]` is the **energy token** for that cycle; a long-demand uop (DIV, FDIV, AMO) keeps charging `E` for every cycle it occupies the FU.
+- `N_c[n]` — how many class-`c` uops **issued this cycle or still occupy EX** (DIV/FDIV/AMO keep charging).
+- `w_c` — extra tile mA for one such occupant (the **power token**).
+- `I0` — always-on floor (frontend + glue + unmatched flats). Hello puts this at **~64–73 mA**.
+- `E[n]` — **energy token** for that cycle. A long-demand uop adds `w_c · V · Tclk` every cycle it holds the FU.
 
-`w_c` values in the CSV are **relative priors**. Replace them by OLS of LACPo `I[n]` on occupancy. The hello VCD now gives a real `I[n]`; occupancy `N_c[n]` is the remaining fit input.
+`prior_w_mA` in the CSVs (8 / 22 / 28 / …) are **relative priors**, not OLS. Hello gives a real `I[n]`. Occupancy `N_c[n]` from IQ `uopc` / `fu_code` / grant is the remaining fit input. Until that lands, do not treat a class’s prior as a measured utilization cost.
 
 # Default grant, then current-class packing
 
