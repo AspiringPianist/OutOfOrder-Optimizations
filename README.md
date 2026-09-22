@@ -93,26 +93,128 @@ The ICPP08 VISA paper is the same *knob* (a decode tag that reorders grant) aime
 
 Sim binary: `D:\chipyard\sims\verilator\simulator-chipyard-MediumBoomConfig-debug`. sklearn 0.20 only (`.envs/py37` / `environment.yml`).
 
-# Hello VCD → hardware current (landed)
+# Findings: hello VCD → hardware current
 
-Canonical path: HTIF `hello` ELF (fesvr `printf` + `tohost`, **no pk**, **no UART**), full Verilator dump, LACPo compose, then `I_u = P_u / 1.1`.
+First **real** MediumBoom cycle-level current: HTIF `hello` (fesvr `printf` + `tohost`, **no pk**, **no UART**), full Verilator dump, 20 LACPo trees, then `I_u = P_u / 1.1 V`. This is lumped **BoomTile equivalent supply current**, not a probed VDD net. Glue is `P_parent − Σ P_child` (tile leftover after the child DTs). Clock is 3 ns. sklearn 0.20.4, all 20 trees `source=features_csv`.
 
-- 17 262 cycles · tile **72.7 mA mean / 146.6 mA peak / 4141 nJ**
-- 204 / 326 LACPo nets remapped from flattened `TOP.TestHarness.dut.system.boom_tile...`
-- 7 hardware groups, 20 LACPo blocks
-- Hello activity after ~30 µs; peak is INT EX + rename. gshare/BPD and LSU leaves are **flat** (unmatched features, not true constant power)
+Gallery + CSV: [`results/hello_vcd/`](results/hello_vcd/README.md). Full-rate tables and the 213 MB VCD stay local (`traces/hello_vcd/`, `D:\cy-tmp\boom_real\`).
 
-Figures and the per-block table: [`results/hello_vcd/`](results/hello_vcd/README.md).
+## Tile
 
-![BoomTile I(t), hello active window](results/hello_vcd/07_tile_I_active.png)
+| | P | I | Energy |
+|---|---:|---:|---:|
+| Min | 68.9 mW | 62.6 mA | |
+| Mean | **80.0 mW** | **72.7 mA** | **4141 nJ** |
+| Peak | **161.3 mW** | **146.6 mA** | |
+| Cycles | 17 262 | Tclk 3 ns | 51.8 µs |
 
-![Hardware-group I(t)](results/hello_vcd/10_groups_I_t.png)
+Hello is idle/reset for ~30 µs, then a short burst. Peak is **2.0×** mean. That burst — not the 72.7 mA floor — is what first-droop C has to cover.
+
+![BoomTile I(t)](results/hello_vcd/01_tile_I.png)
+
+![BoomTile I(t), t ≥ 30 µs](results/hello_vcd/07_tile_I_active.png)
+
+![BoomTile P(t)](results/hello_vcd/08_tile_P.png)
+
+## Hardware groups
+
+`I_group = Σ I_block` over the LACPo trees in that group.
+
+| Group | Units | Mean (mA) | Peak (mA) | Share | Energy (nJ) |
+|---|---|---:|---:|---:|---:|
+| frontend | I$ / FTQ / BTB / gshare | 26.08 | 30.62 | **35.9%** | 1486 |
+| INT EX | INT IQ, ALU0/1, int RF, CSR | 16.36 | **65.44** | 22.5% | 932 |
+| glue | tile leftover | 9.89 | 18.76 | 13.6% | 563 |
+| FP | FP IQ / FPU / FMA / FDiv | 8.07 | 19.37 | 11.1% | 460 |
+| MEM | MEM IQ, LSU | 6.01 | 16.59 | 8.3% | 342 |
+| rename / ROB | maptables, freelists, ROB | 5.98 | 26.66 | 8.2% | 341 |
+| decode | decode0 + decode1 | 0.30 | 2.34 | 0.4% | 17 |
+
+Frontend is the **floor** (almost flat, 26–31 mA). The **di/dt** is INT EX (peak 65 mA) plus rename/ROB (peak 27 mA) when hello actually runs. Decode is noise. FP is ~8 mA on a program with no FP — that is leakage / unmatched-feature floor, not FMA work.
+
+![Groups stacked](results/hello_vcd/02_groups_stacked.png)
+
+![Groups stacked, t ≥ 30 µs](results/hello_vcd/04_groups_stacked_active.png)
+
+![Groups overlaid](results/hello_vcd/03_groups_lines.png)
+
+![Groups overlaid, t ≥ 30 µs](results/hello_vcd/09_groups_lines_active.png)
+
+![One I(t) panel per group](results/hello_vcd/10_groups_I_t.png)
+
+![Groups, t ≥ 30 µs](results/hello_vcd/11_groups_I_t_active.png)
+
+![Group mean vs peak](results/hello_vcd/06_groups_mean_peak.png)
+
+## Per-block (20 LACPo trees)
+
+| Units | Group | Token prior | Mean (mA) | Peak (mA) | Share |
+|---|---|---|---:|---:|---:|
+| gshare / BPD | frontend | LOW | 15.82 | 15.82 | 21.8% |
+| tile glue | glue | LOW | 9.89 | 18.76 | 13.6% |
+| FP IQ / FPU / FMA / FDiv | fp | HIGH | 8.07 | 19.37 | 11.1% |
+| int RF | int_ex | LOW | 5.51 | **37.24** | 7.6% |
+| BTB | frontend | LOW | 5.45 | 5.45 | 7.5% |
+| I$ / FTQ / fetch | frontend | LOW | 4.80 | 9.35 | 6.6% |
+| INT0 ALU / JMP / MUL | int_ex | LOW | 4.47 | 20.17 | 6.1% |
+| AGU / LDQ / STQ / D$ | mem | MID | 4.06 | 4.06 | 5.6% |
+| int RF read | int_ex | LOW | 2.68 | 5.04 | 3.7% |
+| ROB | rename_rob | LOW | 2.49 | 7.96 | 3.4% |
+| INT IQ | int_ex | LOW | 2.10 | 14.45 | 2.9% |
+| MEM IQ | mem | MID | 1.96 | 12.54 | 2.7% |
+| int maptable | rename_rob | LOW | 1.21 | 7.73 | 1.7% |
+| fp maptable | rename_rob | MID | 1.15 | 7.17 | 1.6% |
+| CSR file | int_ex | MID | 0.80 | 3.02 | 1.1% |
+| INT1 ALU / CSR / DIV | int_ex | MID | 0.80 | 7.39 | 1.1% |
+| int freelist | rename_rob | LOW | 0.78 | 3.70 | 1.1% |
+| fp freelist | rename_rob | MID | 0.35 | 2.36 | 0.5% |
+| decode1 | decode | LOW | 0.17 | 1.28 | 0.2% |
+| decode0 | decode | LOW | 0.14 | 1.36 | 0.2% |
+
+CSV: [`results/hello_vcd/hw_current_summary.csv`](results/hello_vcd/hw_current_summary.csv).
+
+Peak movers on this run: **int RF (37 mA)**, INT0 ALU (20 mA), INT IQ (14 mA), MEM IQ (13 mA). Those are the hardware tags the issue queue can actually see. Mean current is dominated by **gshare (constant 15.8 mA)** + glue + a dead FP pipe — that is *not* a packing knob.
 
 ![Per-block I(t)](results/hello_vcd/12_blocks_I_t.png)
 
+![Per-block I(t), t ≥ 30 µs](results/hello_vcd/13_blocks_I_t_active.png)
+
 ![Per-block mean vs peak](results/hello_vcd/05_blocks_mean_peak.png)
 
-Reproduce: `sim/run_htif_hello.sh` → `sim/run_htif_hello_full.sh` → `tools/run_lacpo_flow.py --vcd` → `tools/decompose_hw_current.py` → `tools/export_hw_current_plots.py`. Full-rate CSVs and the 213 MB VCD stay off-git (`traces/hello_vcd/`, `D:\cy-tmp\boom_real\`).
+## What this means for tokens / C
+
+- A per-dynamic-instruction joule is still ill-posed (2-wide INT + MEM + FP). Tokens stay **hardware-class × occupancy**: `I[n] ≈ I0 + Σ w_c N_c[n]`.
+- **I0 ≈ 64–73 mA** on hello (frontend + glue + flat BPD/LSU/FP). The scheduler only spends the **delta**.
+- The units that slew are INT RF / INT0 / INT IQ / rename — i.e. the LOW integer class firing together, not the HIGH FP/DIV priors. Hello does not excite MUL/DIV/FMA/AMO, so those `w_c` are still **unmeasured**.
+- Packing HIGH-with-HIGH will not show up on this trace. The useful observation is already here: INT EX peak is **4×** its mean (16 → 65 mA). That is the `di/dt` first-droop C pays for. Plateau packing of integer issue is the first lever.
+- 3 tags (LOW/MID/HIGH) are enough to *name* the budget. They are **not** yet enough to claim a C reduction — need `N_c[n]` from the IQ and a workload that actually issues HIGH.
+
+## How the current was obtained
+
+1. **HTIF, not UART.** `printf` goes to fesvr via `tohost`/`fromhost`. TestHarness UART stays null. `*** PASSED ***` prints only with `+verbose` (and that enables huge BOOM commit printf). Look for fesvr stdout + `sim_exit=0`.
+2. **No pk on hello.** `pk` + `load_step` boots bbl (~millions of cycles) and was run without `+vcdfile` on purpose. Hello is linked with `htif_nano.specs` (`sim/run_htif_hello.sh`). A 200k-cycle cap is only a watchdog; hello already exits via `tohost` in ~8 s of sim.
+3. **Full VCD** (`sim/run_htif_hello_full.sh`): 213 MB, 17 262 cycles, `+vcdfile` on the debug MediumBoom sim.
+4. **Name remap** (`tools/vcd2features.py`): Verilator flattens `TOP.TestHarness.dut.system.boom_tile...`. LACPo was trained on `TestDriver.testHarness.TestHarness.boom_tile.core...`. Remap: prefix swap, `core.lsu` → `lsu`, `ALUExeUnit` → `jmp_unit`, `brinfo` → `brupdate`, unique leaf fallback. Clock → `...boom_tile.lsu.clock`. **204 / 326** nets matched; unmatched traces are **zero-filled**.
+5. **Compose** (`tools/run_lacpo_flow.py --vcd`): 20 DTs → `composed_P_t.csv` + `load_current.pwl`.
+6. **Decompose** (`tools/decompose_hw_current.py`): `I_u = P_u / 1.1`, 7 groups. **Export** (`tools/export_hw_current_plots.py`): PNGs `01`–`13`.
+
+Unmatched on this dump (look constant — **do not treat as measured power**):
+
+- gshare / BPD = 15.82 mA flat
+- BTB = 5.45 mA flat
+- LSU (AGU/LDQ/STQ/D$) = 4.06 mA flat
+
+Those are missing BPD/LSU leaf nets in the flattened VCD, not a physical DC load.
+
+## Reproduce
+
+```text
+wsl -d Ubuntu -e bash sim/run_htif_hello.sh
+wsl -d Ubuntu -e bash sim/run_htif_hello_full.sh
+python tools/run_lacpo_flow.py --vcd D:\cy-tmp\boom_real\hello.vcd
+python tools/decompose_hw_current.py D:\cy-tmp\boom_real\lacpo_hello\composed_P_t.csv D:\cy-tmp\boom_real\lacpo_hello
+python tools/export_hw_current_plots.py D:\cy-tmp\boom_real\lacpo_hello traces\hello_vcd
+```
 
 # Next steps
 
