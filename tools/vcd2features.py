@@ -12,7 +12,7 @@ import pandas as pd
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "common", "vcd2csv"))
-from Verilog_VCD import parse_vcd  # noqa: E402
+from Verilog_VCD import list_sigs, parse_vcd  # noqa: E402
 
 HD_PREFIXES = ("d2_", "d1_", "d_")
 HIST_PREFIXES = ("v2_", "v1_")
@@ -186,6 +186,55 @@ def engineer_features(traces, features):
     return pd.DataFrame(cols)
 
 
+def boom_rel(name):
+    if "boom_tile." in name:
+        return name.split("boom_tile.", 1)[1]
+    return name
+
+
+def build_vcd_index(vcd_sigs):
+    rel_to_full = {}
+    by_leaf = {}
+    by2 = {}
+    for s in vcd_sigs:
+        if ".boom_tile." not in s:
+            continue
+        rel = s.split(".boom_tile.", 1)[1]
+        rel_to_full[rel] = s
+        leaf = rel.split(".")[-1]
+        by_leaf.setdefault(leaf, []).append(s)
+        parts = rel.split(".")
+        if len(parts) >= 2:
+            by2.setdefault(".".join(parts[-2:]), []).append(s)
+    return rel_to_full, by_leaf, by2
+
+
+def map_lacpo_net(lacpo_net, rel_to_full, by_leaf, by2):
+    """Map a LACPo TestDriver path onto a flattened Verilator boom_tile net."""
+    rel = boom_rel(lacpo_net)
+    tries = [rel]
+    if rel.startswith("core.lsu"):
+        tries.append(rel[len("core."):])
+    if "ALUExeUnit" in rel:
+        tries.append(rel.replace("ALUExeUnit", "jmp_unit"))
+    if "brinfo" in rel:
+        tries.append(rel.replace("brinfo", "brupdate"))
+        if rel.startswith("core.lsu"):
+            tries.append(rel[len("core."):].replace("brinfo", "brupdate"))
+    for t in tries:
+        if t in rel_to_full:
+            return rel_to_full[t]
+    key2 = ".".join(rel.split(".")[-2:])
+    hits = by2.get(key2, [])
+    if len(hits) == 1:
+        return hits[0]
+    leaf = rel.split(".")[-1]
+    hits = by_leaf.get(leaf, [])
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
 def parse_signal_list(path):
     clock = None
     nets = []
@@ -292,11 +341,33 @@ def write_vcd(path, clock_net, traces, period_ns=3):
 
 def vcd_to_features(vcd_path, features, clock_net, period_ns=3):
     nets = needed_nets(features)
-    if clock_net not in nets:
-        pass
-    vcd = parse_vcd(vcd_path, siglist=[clock_net] + nets)
-    mappings, edges, period = sample_at_clock(vcd, clock_net, period_ns)
-    traces = traces_for_nets(vcd, mappings, nets, edges)
+    vcd_sigs = list_sigs(vcd_path)
+    rel_to_full, by_leaf, by2 = build_vcd_index(vcd_sigs)
+    rename = {}
+    for n in [clock_net] + list(nets):
+        mapped = map_lacpo_net(n, rel_to_full, by_leaf, by2)
+        if mapped:
+            rename[n] = mapped
+    clock_vcd = rename.get(clock_net)
+    if not clock_vcd:
+        # last-resort: tile LSU clock on this Verilator dump
+        clock_vcd = rel_to_full.get("lsu.clock")
+        if clock_vcd:
+            rename[clock_net] = clock_vcd
+    if not clock_vcd:
+        die("Clock %s not in VCD after remap. Have %d boom_tile nets." % (
+            clock_net, len(rel_to_full)))
+    siglist = sorted(set(rename.values()))
+    print("vcd map: %d/%d nets (+clock) matched" % (len(rename) - (1 if clock_net in rename else 0), len(nets)))
+    print("clock", clock_net, "->", clock_vcd)
+    vcd = parse_vcd(vcd_path, siglist=siglist)
+    mappings, edges, period = sample_at_clock(vcd, clock_vcd, period_ns)
+    # traces keyed by LACPo names so feature columns stay model-facing
+    vcd_traces = traces_for_nets(vcd, mappings, siglist, edges)
+    traces = {}
+    for n in nets:
+        src = rename.get(n)
+        traces[n] = vcd_traces[src] if src else [0] * len(edges)
     df = engineer_features(traces, features)
     return df, period
 

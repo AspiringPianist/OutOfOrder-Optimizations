@@ -54,7 +54,7 @@ E[n]  =  I[n] · 1.1 V · 3 ns
 
 `N_c[n]` is how many class-`c` uops are issued or still in EX this cycle. `w_c` is the per-class **power token** (mA of extra tile current). The scheduler spends the **sum**. `E[n]` is the **energy token** for that cycle; a long-demand uop (DIV, FDIV, AMO) keeps charging `E` for every cycle it occupies the FU.
 
-`w_c` values in the CSV are **relative priors**. Replace them by OLS of LACPo `I[n]` on occupancy once a real hierarchical VCD exists.
+`w_c` values in the CSV are **relative priors**. Replace them by OLS of LACPo `I[n]` on occupancy. The hello VCD now gives a real `I[n]`; occupancy `N_c[n]` is the remaining fit input.
 
 # Default grant, then current-class packing
 
@@ -85,22 +85,44 @@ The ICPP08 VISA paper is the same *knob* (a decode tag that reorders grant) aime
 | `BOOM/` | LACPo pretrained DTs, PTPX, feature lists. See `BOOM/README.md`. |
 | `RI5CY/` | In-order core power models. |
 | `common/vcd2csv/` | VCD → cycle features. |
-| `programs/` | `idle`, `load_step`, `matmul`, `branch_storm`. ELFs have no `tohost`; run with `pk`. |
-| `sim/` | WSL Verilator wrappers, signal list, ISA maps. |
-| `tools/` | LACPo invoke, VCD features, token model. |
+| `programs/` | `hello` (HTIF / `tohost`), plus `idle`, `load_step`, `matmul`, `branch_storm` (pk, no `tohost`). |
+| `sim/` | WSL Verilator wrappers, HTIF hello scripts, signal list, ISA maps. |
+| `tools/` | LACPo invoke, Verilator→LACPo VCD remap, HW-current decomp, I(t) PNG export. |
+| `results/hello_vcd/` | Hello-run I(t) figures + per-block summary. |
 | `slides/iq-current-support.html` | Advisor B&W deck. |
 
 Sim binary: `D:\chipyard\sims\verilator\simulator-chipyard-MediumBoomConfig-debug`. sklearn 0.20 only (`.envs/py37` / `environment.yml`).
 
+# Hello VCD → hardware current (landed)
+
+Canonical path: HTIF `hello` ELF (fesvr `printf` + `tohost`, **no pk**, **no UART**), full Verilator dump, LACPo compose, then `I_u = P_u / 1.1`.
+
+- 17 262 cycles · tile **72.7 mA mean / 146.6 mA peak / 4141 nJ**
+- 204 / 326 LACPo nets remapped from flattened `TOP.TestHarness.dut.system.boom_tile...`
+- 7 hardware groups, 20 LACPo blocks
+- Hello activity after ~30 µs; peak is INT EX + rename. gshare/BPD and LSU leaves are **flat** (unmatched features, not true constant power)
+
+Figures and the per-block table: [`results/hello_vcd/`](results/hello_vcd/README.md).
+
+![BoomTile I(t), hello active window](results/hello_vcd/07_tile_I_active.png)
+
+![Hardware-group I(t)](results/hello_vcd/10_groups_I_t.png)
+
+![Per-block I(t)](results/hello_vcd/12_blocks_I_t.png)
+
+![Per-block mean vs peak](results/hello_vcd/05_blocks_mean_peak.png)
+
+Reproduce: `sim/run_htif_hello.sh` → `sim/run_htif_hello_full.sh` → `tools/run_lacpo_flow.py --vcd` → `tools/decompose_hw_current.py` → `tools/export_hw_current_plots.py`. Full-rate CSVs and the 213 MB VCD stay off-git (`traces/hello_vcd/`, `D:\cy-tmp\boom_real\`).
+
 # Next steps
 
-1. **Finish real MediumBoom traces.** Let `pk load_step` (and then `idle`, `matmul`, `branch_storm`) complete past `bbl loader`. 20k-cycle smoke timing out is expected; use ~4e6 cycles.
-2. **Map Verilator VCD names to LACPo.** Flattened nets (`int_issue_unit_clock`) must match hierarchical `TestDriver.testHarness.TestHarness.boom_tile...` feature names. No name map ⇒ no real `I[n]`.
+1. ~~Finish a real MediumBoom VCD.~~ HTIF hello + dump is in `results/hello_vcd/`.
+2. ~~Map Verilator VCD names to LACPo.~~ `tools/vcd2features.py` remaps `boom_tile` (204/326).
 3. **Count occupancy `N_c[n]`.** From IQ `uopc` / `fu_code` / grant (and EX occupancy for long-demand), bin into the 13 classes each cycle.
 4. **Fit tokens.** OLS (or non-negative least squares) of LACPo `I[n]` on `[1, N_c[n]]` → `I0` and `w_c`. That is the power token. Energy token is `w_c · V · Tclk` per occupied cycle, times measured residency for DIV/FDIV/AMO.
 5. **Software grant simulator.** Replay ready/uopc streams with (a) default age-order and (b) HIGH-budget plateau packing. Compare `di/dt`, plateau run length, and peak `I`. Do this before any Chisel IQ edit.
 6. **Only then Chisel.** 2-bit LOW/MID/HIGH (or 13-class) tag at decode; grant loop keeps `fu_code` match and adds the HIGH knapsack. Still MediumBoom.
 7. **PDN check.** Drive the packed vs default `I(t)` into the existing PWL / first-droop C estimate. Success is fewer edges and lower required C, not lower average P.
-8. **Optional later:** MegaBoom rebuild + LACPo retrain if the 4-wide / 2-AGU figure becomes the target machine.
+8. **Optional later:** MegaBoom rebuild + LACPo retrain if the 4-wide / 2-AGU figure becomes the target machine. Also rerun `pk load_step` / `matmul` / `branch_storm` for occupancies that hello does not excite.
 
 Do not start IQ RTL, do not retarget `config-mixins.scala`, and do not treat prior `w_c` as measured, until step 4 lands.
