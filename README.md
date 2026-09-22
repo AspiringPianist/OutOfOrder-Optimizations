@@ -143,6 +143,8 @@ Do **not** mix a heavy with a light to “average” current. Averaging in the I
 
 The ICPP08 VISA paper is the same *knob* (a decode tag that reorders grant) aimed at IQ AVF, not current. ACE ≠ HIGH.
 
+How much of that legal window can actually move is measured next: [IQ reorder %](#how-much-of-the-issue-queue-can-reorder). Full tables: [`results/iq_reorder/`](results/iq_reorder/README.md).
+
 # Layout
 
 | Path | Role |
@@ -152,8 +154,9 @@ The ICPP08 VISA paper is the same *knob* (a decode tag that reorders grant) aime
 | `common/vcd2csv/` | VCD → cycle features. |
 | `programs/` | `hello` (HTIF / `tohost`), plus `idle`, `load_step`, `matmul`, `branch_storm` (pk, no `tohost`). |
 | `sim/` | WSL Verilator wrappers, HTIF hello scripts, signal list, ISA maps. |
-| `tools/` | LACPo invoke, Verilator→LACPo VCD remap, HW-current decomp, I(t) PNG export. |
+| `tools/` | LACPo invoke, Verilator→LACPo VCD remap, HW-current decomp, I(t) PNG export, IQ grant replay. |
 | `results/hello_vcd/` | Hello-run I(t) figures + per-block summary. |
+| `results/iq_reorder/` | How much of the IQ can legally reorder (%). |
 | `slides/iq-current-support.html` | Advisor B&W deck. |
 
 Sim binary: `D:\chipyard\sims\verilator\simulator-chipyard-MediumBoomConfig-debug`. sklearn 0.20 only (`.envs/py37` / `environment.yml`).
@@ -281,15 +284,43 @@ python tools/decompose_hw_current.py D:\cy-tmp\boom_real\lacpo_hello\composed_P_
 python tools/export_hw_current_plots.py D:\cy-tmp\boom_real\lacpo_hello traces\hello_vcd
 ```
 
+# How much of the issue queue can reorder
+
+Hello showed the **knob** is INT EX (IQ / ALU0 / int RF), not frontend floor. Next question: of BOOM’s legal grant, how often can we pick a *different* ready uop so the PDN sees a plateau instead of HIGH–LOW chatter?
+
+Full write-up, window tables, and runtime %: **[`results/iq_reorder/`](results/iq_reorder/README.md)**. Code: [`tools/sim_iq_reorder.py`](tools/sim_iq_reorder.py).
+
+MEM IQ and FP IQ are 1-wide → **0%**. INT IQ is 2-wide (20 entries, issue 2). Only the *ready* head can move, a few slots deep — not the tail of the 20.
+
+**Share of ready INT windows where pack ≠ age-order**
+
+| Ready uops | hello-like | ALU+MUL+DIV | HIGH-heavy | full mix |
+|---|---:|---:|---:|---:|
+| 3 | 23% | 43% | 37% | 46% |
+| 6 | 40% | **71%** | 72% | **77%** |
+| 10 | 51% | **76%** | 83% | **82%** |
+
+**Runtime cycles that actually issue a different set** (same arrivals, 12k cycles): hello-like **14%**, INT chatter **20%**, mixed INT ports **83%**, all-HIGH **12%**.
+
+Mixed INT ready windows: **about 70–80% can reorder**. All-ALU or all-HIGH: much less. Pack reaches the 3rd–4th oldest ready slot (~44% of packed grants are not the two oldest on the chatter mix).
+
+Policy (still legal ports, still fill them): pick the grant closest to last-cycle I, then to a slow VRM EMA. Token I(t) from that replay is **experimental** (priors, not LACPo) — do not quote it as mA or C saved. It lives in the same folder so the experiment is logged.
+
+![Reorder % vs ready depth](results/iq_reorder/01_reorder_vs_ready.png)
+
+```text
+python tools/sim_iq_reorder.py
+```
+
 # Next steps
 
-1. ~~Finish a real MediumBoom VCD.~~ HTIF hello + dump is in `results/hello_vcd/`.
+1. ~~Finish a real MediumBoom VCD.~~ HTIF hello + dump is in [`results/hello_vcd/`](results/hello_vcd/README.md).
 2. ~~Map Verilator VCD names to LACPo.~~ `tools/vcd2features.py` remaps `boom_tile` (204/326).
-3. **Count occupancy `N_c[n]`.** From IQ `uopc` / `fu_code` / grant (and EX occupancy for long-demand), bin into the 13 classes each cycle.
-4. **Fit tokens.** OLS (or non-negative least squares) of LACPo `I[n]` on `[1, N_c[n]]` → `I0` and `w_c`. That is the power token. Energy token is `w_c · V · Tclk` per occupied cycle, times measured residency for DIV/FDIV/AMO.
-5. **Software grant simulator.** Replay ready/uopc streams with (a) default age-order and (b) HIGH-budget plateau packing. Compare `di/dt`, plateau run length, and peak `I`. Do this before any Chisel IQ edit.
-6. **Only then Chisel.** 2-bit LOW/MID/HIGH (or 13-class) tag at decode; grant loop keeps `fu_code` match and adds the HIGH knapsack. Still MediumBoom.
-7. **PDN check.** Drive the packed vs default `I(t)` into the existing PWL / first-droop C estimate. Success is fewer edges and lower required C, not lower average P.
-8. **Optional later:** MegaBoom rebuild + LACPo retrain if the 4-wide / 2-AGU figure becomes the target machine. Also rerun `pk load_step` / `matmul` / `branch_storm` for occupancies that hello does not excite.
+3. ~~Software grant replay: how much of the IQ can move.~~ Reorder % in [`results/iq_reorder/`](results/iq_reorder/README.md). Token current from that script is experimental.
+4. **Count occupancy `N_c[n]`.** From IQ `uopc` / `fu_code` / grant (and EX occupancy for long-demand), bin into the 13 classes each cycle.
+5. **Fit tokens.** OLS (or non-negative least squares) of LACPo `I[n]` on `[1, N_c[n]]` → `I0` and `w_c`. That is the power token. Energy token is `w_c · V · Tclk` per occupied cycle, times measured residency for DIV/FDIV/AMO.
+6. **Replay grant on a real occupancy stream.** Same age-order vs PDN pack, but `N_c` from a VCD — not synthetic mixes. Then score first-droop C.
+7. **Only then Chisel.** 2-bit LOW/MID/HIGH (or 13-class) tag at decode; grant loop keeps `fu_code` match and adds the plateau pick. Still MediumBoom.
+8. **Optional later:** MegaBoom rebuild + LACPo retrain if the 4-wide / 2-AGU figure becomes the target machine. Also rerun HTIF kernels that actually issue HIGH (hello does not).
 
-Do not start IQ RTL, do not retarget `config-mixins.scala`, and do not treat prior `w_c` as measured, until step 4 lands.
+Do not start IQ RTL, do not retarget `config-mixins.scala`, and do not treat prior `w_c` or the experimental token I(t) as measured, until step 5 lands.
